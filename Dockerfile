@@ -15,9 +15,11 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
-# Only install production server deps
+# Only install production server deps (need root lock file for workspaces)
+COPY package*.json ./
 COPY server/package*.json ./server/
-RUN cd server && npm ci --omit=dev
+COPY client/package*.json ./client/
+RUN npm ci --workspace=server --omit=dev
 
 COPY --from=builder /app/server ./server
 COPY --from=builder /app/client/dist ./client/dist
