@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm show *)",
+      "Bash(node -e \"const v=JSON.parse\\(require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\)\\); console.log\\(v.slice\\(-5\\).join\\('\\\\n'\\)\\)\")",
+      "PowerShell(Set-Location \"c:\\\\projects\\\\calisthenics-tracker\"; $env:ENCRYPTION_KEY = \"0000000000000000000000000000000000000000000000000000000000000000\"; $job = Start-Job { Set-Location \"c:\\\\projects\\\\calisthenics-tracker\"; node server/server.js 2>&1 }; Start-Sleep -Seconds 3; Receive-Job $job; Stop-Job $job; Remove-Job $job)",
+      "PowerShell(Set-Location \"c:\\\\projects\\\\calisthenics-tracker\"; $env:ENCRYPTION_KEY = \"0000000000000000000000000000000000000000000000000000000000000000\"; $job = Start-Job -ScriptBlock { $env:ENCRYPTION_KEY = \"0000000000000000000000000000000000000000000000000000000000000000\"; Set-Location \"c:\\\\projects\\\\calisthenics-tracker\"; node server/server.js 2>&1 }; Start-Sleep -Seconds 4; Receive-Job $job; Stop-Job $job; Remove-Job $job)",
+      "Read(//c/Users/stavh/.claude/projects/c--projects-calisthenics-tracker/memory/**)",
+      "Bash(npm run *)",
+      "Bash(node -e \"require\\('./src/app'\\)\")"
+    ]
+  }
+}
