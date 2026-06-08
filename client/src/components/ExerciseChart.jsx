@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
-  ScatterChart, Scatter, LineChart, Line,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, ReferenceLine, Legend, LabelList,
 } from 'recharts';
 import { format } from 'date-fns';
 
@@ -26,6 +26,19 @@ function buildSessions(points) {
   return Object.values(map).sort((a, b) => a.dateTs - b.dateTs);
 }
 
+// Smart Y domain: if data is clustered away from 0, zoom in to show the trend clearly
+function smartDomain(values) {
+  if (!values.length) return [0, 10];
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const range = max - min;
+  // Start from 0 only if data goes near 0 (within 40% of max) or there's no variance
+  const yMin = (range > 0 && min / max > 0.45)
+    ? Math.max(0, Math.floor(min - range * 0.4))
+    : 0;
+  return [yMin, Math.ceil(max * 1.18)];
+}
+
 function makeXAxis(sessions) {
   const ts = sessions.map(s => s.dateTs);
   return {
@@ -41,36 +54,54 @@ function makeXAxis(sessions) {
   };
 }
 
-function makeYAxis(maxVal, label) {
+function yAxisStyle(unit) {
   return {
-    domain: [0, Math.ceil((maxVal || 1) * 1.15)],
     tick: { fontSize: 10, fill: 'rgba(255,255,255,0.3)' },
     axisLine: false,
     tickLine: false,
-    label: { value: label, angle: -90, position: 'insideLeft', fontSize: 10, fill: 'rgba(255,255,255,0.2)', offset: 10 },
+    label: { value: unit, angle: -90, position: 'insideLeft', fontSize: 10, fill: 'rgba(255,255,255,0.2)', offset: 10 },
   };
 }
 
 const GRID = { strokeDasharray: '3 3', stroke: 'rgba(255,255,255,0.04)' };
-const MARGIN = { top: 10, right: 20, bottom: 30, left: 0 };
+const MARGIN = { top: 16, right: 24, bottom: 32, left: 0 };
 
 function PBLine({ value, label }) {
   if (!value) return null;
   return (
-    <ReferenceLine y={value} stroke="rgba(99,102,241,0.3)" strokeDasharray="4 4"
-      label={{ value: label, position: 'right', fontSize: 9, fill: 'rgba(99,102,241,0.6)' }} />
+    <ReferenceLine y={value} stroke="rgba(99,102,241,0.35)" strokeDasharray="4 4"
+      label={{ value: label, position: 'right', fontSize: 9, fill: 'rgba(99,102,241,0.7)' }} />
   );
 }
 
-function ScatterTooltip({ active, payload }) {
+// Trend badge: % change from first to last session
+function TrendBadge({ firstVal, lastVal }) {
+  if (firstVal == null || lastVal == null || firstVal === 0) return null;
+  const pct = Math.round((lastVal / firstVal - 1) * 100);
+  if (pct === 0) return <span className="text-xs text-white/25">no change</span>;
+  return (
+    <span className={`text-xs font-medium ${pct > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+      {pct > 0 ? '↑' : '↓'} {Math.abs(pct)}% since first session
+    </span>
+  );
+}
+
+// Per-set tooltip: shows all set values for a hovered session
+function PerSetTooltip({ active, payload, trackAs }) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
-  const unit = d.trackAs === 'reps' ? '' : 's';
+  const unit = trackAs === 'reps' ? '' : 's';
   return (
     <div className="bg-[#1e2535] border border-white/10 rounded-xl shadow-xl p-3 text-xs">
       <p className="text-white/50 mb-1">{format(new Date(d.date), 'MMM d, yyyy')}</p>
-      <p className="text-white font-medium">{d.activity_name}</p>
-      <p className="text-indigo-400 mt-1">Set {d.set_order + 1}: <strong className="text-white">{d.value}{unit}</strong></p>
+      <p className="text-white font-medium mb-2">{d.activity_name}</p>
+      <div className="space-y-0.5">
+        {payload.filter(p => p.value != null).map((p, i) => (
+          <p key={i} style={{ color: p.color }}>
+            {p.name}: <strong className="text-white">{p.value}{unit}</strong>
+          </p>
+        ))}
+      </div>
     </div>
   );
 }
@@ -130,12 +161,61 @@ function ViewToggle({ mode, onChange }) {
   );
 }
 
+function ChartHeader({ mode, onModeChange, trendFirst, trendLast }) {
+  return (
+    <div className="flex items-center justify-between gap-3 flex-wrap">
+      <ViewToggle mode={mode} onChange={onModeChange} />
+      <TrendBadge firstVal={trendFirst} lastVal={trendLast} />
+    </div>
+  );
+}
+
+// ── Single-session stat display (no chart needed) ────────────────────────
+function SingleSessionStats({ sessions, trackAs, viewMode, onModeChange }) {
+  const s = sessions[0];
+  const sorted = [...s.sets].sort((a, b) => a.order - b.order);
+  const unit = trackAs === 'reps' ? '' : 's';
+  const total = sorted.reduce((sum, x) => sum + x.value, 0);
+  const avg = sorted.length ? Math.round(total / sorted.length * 10) / 10 : 0;
+
+  return (
+    <div className="space-y-3">
+      <ViewToggle mode={viewMode} onChange={onModeChange} />
+      <div className="py-4 px-2">
+        <p className="text-white/25 text-xs mb-4">Only 1 session recorded — stats below</p>
+        <div className="flex flex-wrap gap-4">
+          {sorted.map((s, i) => (
+            <div key={i} className="text-center">
+              <p className="text-2xl font-bold" style={{ color: SET_COLORS[i % SET_COLORS.length] }}>
+                {s.value}{unit}
+              </p>
+              <p className="text-white/30 text-xs mt-0.5">Set {i + 1}</p>
+            </div>
+          ))}
+          {sorted.length > 1 && (
+            <>
+              <div className="text-center border-l border-white/10 pl-4">
+                <p className="text-2xl font-bold text-white/70">{total}{unit}</p>
+                <p className="text-white/30 text-xs mt-0.5">Total</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold text-white/50">{avg}{unit}</p>
+                <p className="text-white/30 text-xs mt-0.5">Avg</p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ExerciseChart({ points, trackAs }) {
   const [viewMode, setViewMode] = useState('perSet');
 
   if (!points || points.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 text-white/20 text-sm">
+      <div className="flex items-center justify-center h-48 text-white/20 text-sm">
         No data in selected range
       </div>
     );
@@ -144,53 +224,68 @@ export default function ExerciseChart({ points, trackAs }) {
   const unit = valLabel(trackAs);
   const sessions = buildSessions(points);
   const xa = makeXAxis(sessions);
+  const showLabels = sessions.length <= 5;
 
-  // ── Per set (scatter) ────────────────────────────────────────────────
+  if (sessions.length === 1) {
+    return <SingleSessionStats sessions={sessions} trackAs={trackAs} viewMode={viewMode} onModeChange={setViewMode} />;
+  }
+
+  // ── Per set (connected line per set order) ───────────────────────────
   if (viewMode === 'perSet') {
-    const maxSet = Math.max(...points.map(p => p.set_order));
-    const series = [];
-    for (let i = 0; i <= maxSet; i++) {
-      const pts = points
-        .filter(p => p.set_order === i && p.value != null)
-        .map(p => ({ ...p, dateTs: new Date(p.date).getTime() }));
-      if (pts.length > 0) series.push({ setOrder: i, pts });
-    }
-    const allTs = points.map(p => new Date(p.date).getTime());
-    const allVals = points.filter(p => p.value != null).map(p => p.value);
-    const minTs = Math.min(...allTs);
-    const maxTs = Math.max(...allTs);
-    const xTicks = [...new Set(allTs)].sort();
-    const pbValue = Math.max(...allVals);
+    const maxSetOrder = Math.max(...sessions.flatMap(s => s.sets.map(x => x.order)));
+    const data = sessions.map(s => {
+      const row = { dateTs: s.dateTs, date: s.date, activity_name: s.activity_name };
+      for (let i = 0; i <= maxSetOrder; i++) {
+        const found = s.sets.find(x => x.order === i);
+        row[`s${i}`] = found?.value ?? null;
+      }
+      return row;
+    });
+    const allVals = data.flatMap(d =>
+      Array.from({ length: maxSetOrder + 1 }, (_, i) => d[`s${i}`]).filter(v => v != null)
+    );
+    const [yMin, yMax] = smartDomain(allVals);
+    const pb = allVals.length ? Math.max(...allVals) : 0;
+
+    // Trend: best set of first vs best set of last session
+    const firstBest = sessions[0].sets.length ? Math.max(...sessions[0].sets.map(s => s.value)) : null;
+    const lastBest = sessions.at(-1).sets.length ? Math.max(...sessions.at(-1).sets.map(s => s.value)) : null;
 
     return (
       <div className="space-y-3">
-        <ViewToggle mode={viewMode} onChange={setViewMode} />
+        <ChartHeader mode={viewMode} onModeChange={setViewMode} trendFirst={firstBest} trendLast={lastBest} />
         <ResponsiveContainer width="100%" height={280}>
-          <ScatterChart margin={MARGIN}>
+          <LineChart data={data} margin={MARGIN}>
             <CartesianGrid {...GRID} />
-            <XAxis
-              dataKey="dateTs" type="number"
-              domain={[minTs - 86400000 * 2, maxTs + 86400000 * 2]}
-              ticks={xTicks}
-              tickFormatter={(ts) => format(new Date(ts), 'MMM d')}
-              tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.3)' }}
-              axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
-              tickLine={false}
-            />
-            <YAxis
-              dataKey="value" domain={[0, Math.ceil(pbValue * 1.15)]}
-              tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.3)' }}
-              axisLine={false} tickLine={false}
-              label={{ value: unit, angle: -90, position: 'insideLeft', fontSize: 10, fill: 'rgba(255,255,255,0.2)', offset: 10 }}
-            />
-            <Tooltip content={<ScatterTooltip />} cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
-            <PBLine value={pbValue} label={`PB: ${pbValue}`} />
-            {series.map(({ setOrder, pts }) => (
-              <Scatter key={setOrder} name={`Set ${setOrder + 1}`} data={pts}
-                fill={SET_COLORS[setOrder % SET_COLORS.length]} opacity={0.85} r={5} />
+            <XAxis {...xa} />
+            <YAxis domain={[yMin, yMax]} {...yAxisStyle(unit)} />
+            <Tooltip content={(p) => <PerSetTooltip {...p} trackAs={trackAs} />}
+              cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
+            <PBLine value={pb} label={`PB ${pb}`} />
+            {Array.from({ length: maxSetOrder + 1 }, (_, i) => (
+              <Line key={i} type="monotone" dataKey={`s${i}`} name={`Set ${i + 1}`}
+                stroke={SET_COLORS[i % SET_COLORS.length]} strokeWidth={2}
+                dot={{ r: 4, fill: SET_COLORS[i % SET_COLORS.length], strokeWidth: 0 }}
+                activeDot={{ r: 6 }} isAnimationActive={false} connectNulls={false}>
+                {showLabels && (
+                  <LabelList dataKey={`s${i}`} position="top"
+                    style={{ fontSize: 10, fill: 'rgba(255,255,255,0.45)' }}
+                    formatter={(v) => v != null ? v : ''} />
+                )}
+              </Line>
             ))}
-          </ScatterChart>
+          </LineChart>
         </ResponsiveContainer>
+        {maxSetOrder > 0 && (
+          <div className="flex flex-wrap gap-3">
+            {Array.from({ length: maxSetOrder + 1 }, (_, i) => (
+              <span key={i} className="flex items-center gap-1.5 text-xs text-white/40">
+                <span className="w-2.5 h-0.5 inline-block rounded" style={{ background: SET_COLORS[i % SET_COLORS.length] }} />
+                Set {i + 1}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -201,20 +296,27 @@ export default function ExerciseChart({ points, trackAs }) {
       ...s,
       value: s.sets.reduce((sum, x) => sum + x.value, 0),
     }));
-    const pb = Math.max(...data.map(d => d.value));
+    const vals = data.map(d => d.value);
+    const [yMin, yMax] = smartDomain(vals);
+    const pb = Math.max(...vals);
     return (
       <div className="space-y-3">
-        <ViewToggle mode={viewMode} onChange={setViewMode} />
+        <ChartHeader mode={viewMode} onModeChange={setViewMode} trendFirst={data[0].value} trendLast={data.at(-1).value} />
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={data} margin={MARGIN}>
             <CartesianGrid {...GRID} />
             <XAxis {...xa} />
-            <YAxis {...makeYAxis(pb, `Total ${unit.toLowerCase()}`)} />
+            <YAxis domain={[yMin, yMax]} {...yAxisStyle(`Total ${unit.toLowerCase()}`)} />
             <Tooltip content={(p) => <LineTooltip {...p} mode="total" trackAs={trackAs} />}
               cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
-            <PBLine value={pb} label={`Best: ${pb}`} />
+            <PBLine value={pb} label={`Best ${pb}`} />
             <Line type="monotone" dataKey="value" name="Total" stroke="#818cf8" strokeWidth={2}
-              dot={{ r: 4, fill: '#818cf8', strokeWidth: 0 }} activeDot={{ r: 6 }} isAnimationActive={false} />
+              dot={{ r: 4, fill: '#818cf8', strokeWidth: 0 }} activeDot={{ r: 6 }} isAnimationActive={false}>
+              {showLabels && (
+                <LabelList dataKey="value" position="top"
+                  style={{ fontSize: 10, fill: 'rgba(255,255,255,0.45)' }} />
+              )}
+            </Line>
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -229,27 +331,34 @@ export default function ExerciseChart({ points, trackAs }) {
         ? Math.round(s.sets.reduce((sum, x) => sum + x.value, 0) / s.sets.length * 10) / 10
         : null,
     })).filter(d => d.value != null);
-    const pb = Math.max(...data.map(d => d.value));
+    const vals = data.map(d => d.value);
+    const [yMin, yMax] = smartDomain(vals);
+    const pb = Math.max(...vals);
     return (
       <div className="space-y-3">
-        <ViewToggle mode={viewMode} onChange={setViewMode} />
+        <ChartHeader mode={viewMode} onModeChange={setViewMode} trendFirst={data[0].value} trendLast={data.at(-1).value} />
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={data} margin={MARGIN}>
             <CartesianGrid {...GRID} />
             <XAxis {...xa} />
-            <YAxis {...makeYAxis(pb, `Avg ${unit.toLowerCase()}`)} />
+            <YAxis domain={[yMin, yMax]} {...yAxisStyle(`Avg ${unit.toLowerCase()}`)} />
             <Tooltip content={(p) => <LineTooltip {...p} mode="avg" trackAs={trackAs} />}
               cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
-            <PBLine value={pb} label={`Best avg: ${pb}`} />
-            <Line type="monotone" dataKey="value" name="Session avg" stroke="#34d399" strokeWidth={2}
-              dot={{ r: 4, fill: '#34d399', strokeWidth: 0 }} activeDot={{ r: 6 }} isAnimationActive={false} />
+            <PBLine value={pb} label={`Best avg ${pb}`} />
+            <Line type="monotone" dataKey="value" name="Avg" stroke="#34d399" strokeWidth={2}
+              dot={{ r: 4, fill: '#34d399', strokeWidth: 0 }} activeDot={{ r: 6 }} isAnimationActive={false}>
+              {showLabels && (
+                <LabelList dataKey="value" position="top"
+                  style={{ fontSize: 10, fill: 'rgba(255,255,255,0.45)' }} />
+              )}
+            </Line>
           </LineChart>
         </ResponsiveContainer>
       </div>
     );
   }
 
-  // ── Dropoff (first vs last set) ──────────────────────────────────────
+  // ── Dropoff (first vs last set per session) ──────────────────────────
   if (viewMode === 'dropoff') {
     const data = sessions.map(s => {
       const sorted = [...s.sets].sort((a, b) => a.order - b.order);
@@ -259,30 +368,52 @@ export default function ExerciseChart({ points, trackAs }) {
       return { ...s, first, last, dropoff: first - last };
     }).filter(Boolean);
 
-    const maxVal = data.length ? Math.max(...data.flatMap(d => [d.first, d.last])) : 0;
+    const allVals = data.flatMap(d => [d.first, d.last]);
+    const [yMin, yMax] = smartDomain(allVals);
+    const latestDropoff = data.at(-1);
 
     return (
       <div className="space-y-3">
-        <ViewToggle mode={viewMode} onChange={setViewMode} />
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <ViewToggle mode={viewMode} onChange={setViewMode} />
+          {latestDropoff && (
+            <span className="text-xs text-white/35">
+              Latest dropoff:{' '}
+              <span className={latestDropoff.dropoff > 0 ? 'text-orange-400' : 'text-emerald-400'}>
+                {latestDropoff.dropoff > 0 ? '-' : '+'}{Math.abs(latestDropoff.dropoff)}
+                {trackAs !== 'reps' ? 's' : ''}
+                {latestDropoff.first > 0 ? ` (${Math.round(Math.abs(latestDropoff.dropoff) / latestDropoff.first * 100)}%)` : ''}
+              </span>
+            </span>
+          )}
+        </div>
         <p className="text-white/25 text-xs">
-          First vs last set — gap closing over time means better consistency
+          Gap closing over time = better consistency under fatigue
         </p>
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={data} margin={MARGIN}>
             <CartesianGrid {...GRID} />
             <XAxis {...xa} />
-            <YAxis {...makeYAxis(maxVal, unit)} />
+            <YAxis domain={[yMin, yMax]} {...yAxisStyle(unit)} />
             <Tooltip content={(p) => <LineTooltip {...p} mode="dropoff" trackAs={trackAs} />}
               cursor={{ stroke: 'rgba(255,255,255,0.1)' }} />
-            <Legend
-              iconType="line"
-              wrapperStyle={{ fontSize: 11, paddingTop: 8, color: 'rgba(255,255,255,0.4)' }}
-            />
+            <Legend iconType="line"
+              wrapperStyle={{ fontSize: 11, paddingTop: 8, color: 'rgba(255,255,255,0.4)' }} />
             <Line type="monotone" dataKey="first" name="First set" stroke="#818cf8" strokeWidth={2}
-              dot={{ r: 3, fill: '#818cf8', strokeWidth: 0 }} activeDot={{ r: 5 }} isAnimationActive={false} />
+              dot={{ r: 4, fill: '#818cf8', strokeWidth: 0 }} activeDot={{ r: 6 }} isAnimationActive={false}>
+              {showLabels && (
+                <LabelList dataKey="first" position="top"
+                  style={{ fontSize: 10, fill: 'rgba(129,140,248,0.7)' }} />
+              )}
+            </Line>
             <Line type="monotone" dataKey="last" name="Last set" stroke="#fb923c" strokeWidth={2}
-              dot={{ r: 3, fill: '#fb923c', strokeWidth: 0 }} activeDot={{ r: 5 }}
-              strokeDasharray="5 3" isAnimationActive={false} />
+              dot={{ r: 4, fill: '#fb923c', strokeWidth: 0 }} activeDot={{ r: 6 }}
+              strokeDasharray="5 3" isAnimationActive={false}>
+              {showLabels && (
+                <LabelList dataKey="last" position="bottom"
+                  style={{ fontSize: 10, fill: 'rgba(251,146,60,0.7)' }} />
+              )}
+            </Line>
           </LineChart>
         </ResponsiveContainer>
       </div>
