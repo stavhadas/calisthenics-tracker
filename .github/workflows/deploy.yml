@@ -28,12 +28,12 @@ jobs:
           docker push "$LATEST"
 
       - name: Deploy to GCE instance
-        uses: google-github-actions/ssh-compute@v1
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          instance_name: ${{ secrets.GCE_INSTANCE_NAME }}
-          zone: ${{ secrets.GCE_ZONE }}
-          ssh_private_key: ${{ secrets.GCE_SSH_KEY }}
-          command: |
+          host: ${{ secrets.GCE_HOST }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.GCE_SSH_KEY }}
+          script: |
             IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/calisthenics-tracker:${{ github.ref_name }}"
             gcloud auth configure-docker --quiet
             docker pull "$IMAGE"
