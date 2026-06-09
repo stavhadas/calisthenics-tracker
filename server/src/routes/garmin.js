@@ -95,4 +95,42 @@ router.delete('/disconnect', (req, res) => {
   res.json({ ok: true });
 });
 
+// Export raw OAuth tokens so they can be imported on another instance
+router.get('/session-export', (req, res) => {
+  const session = db.prepare('SELECT oauth1_token, oauth2_token FROM garmin_session WHERE id = 1').get();
+  if (!session?.oauth2_token) {
+    return res.status(404).json({ error: 'No active session to export' });
+  }
+  res.json({ oauth1Token: session.oauth1_token, oauth2Token: session.oauth2_token });
+});
+
+// Import OAuth tokens from a trusted instance (avoids login from blocked IPs)
+router.post('/session-import', async (req, res) => {
+  const { oauth1Token, oauth2Token } = req.body;
+  if (!oauth2Token) return res.status(400).json({ error: 'oauth2Token required' });
+
+  try {
+    const client = garminClient.getClient();
+    const oauth1 = oauth1Token ? JSON.parse(oauth1Token) : null;
+    const oauth2 = JSON.parse(oauth2Token);
+    client.loadToken(oauth1, oauth2);
+
+    // Verify the tokens are still valid
+    await client.getUserProfile();
+
+    db.prepare(`
+      INSERT INTO garmin_session (id, oauth1_token, oauth2_token, connected_at)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        oauth1_token = excluded.oauth1_token,
+        oauth2_token = excluded.oauth2_token,
+        connected_at = excluded.connected_at
+    `).run(oauth1Token || null, oauth2Token, new Date().toISOString());
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(401).json({ error: `Tokens invalid or expired: ${err.message}` });
+  }
+});
+
 module.exports = router;

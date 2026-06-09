@@ -21,6 +21,8 @@ export const api = {
   garminSync: () => request('/api/garmin/sync', { method: 'POST' }),
   garminResync: () => request('/api/garmin/resync', { method: 'POST' }),
   garminDisconnect: () => request('/api/garmin/disconnect', { method: 'DELETE' }),
+  garminSessionExport: () => request('/api/garmin/session-export'),
+  garminSessionImport: (body) => request('/api/garmin/session-import', { method: 'POST', body }),
 
   // Activities
   getActivities: (params = {}) => {
