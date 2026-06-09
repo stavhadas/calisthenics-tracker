@@ -51,12 +51,27 @@ CREATE TABLE IF NOT EXISTS exercise_configs (
 );
 `;
 
+const DDL_V2 = `
+CREATE TABLE IF NOT EXISTS garmin_workouts (
+  workout_id   TEXT PRIMARY KEY,
+  workout_name TEXT NOT NULL,
+  plan_json    TEXT NOT NULL,
+  fetched_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_garmin_workouts_name ON garmin_workouts(workout_name);
+`;
+
 function migrate() {
   const version = db.pragma('user_version', { simple: true });
   if (version < 1) {
     db.exec(DDL_V1);
     db.pragma('user_version = 1');
     console.log('DB migrated to version 1');
+  }
+  if (version < 2) {
+    db.exec(DDL_V2);
+    db.pragma('user_version = 2');
+    console.log('DB migrated to version 2');
   }
 }
 

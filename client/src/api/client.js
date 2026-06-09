@@ -20,6 +20,9 @@ export const api = {
     request('/api/garmin/connect', { method: 'POST', body: { username, password } }),
   garminSync: () => request('/api/garmin/sync', { method: 'POST' }),
   garminResync: () => request('/api/garmin/resync', { method: 'POST' }),
+  garminReimport: () => request('/api/garmin/reimport', { method: 'POST' }),
+  garminRefreshPlans: () => request('/api/garmin/refresh-plans', { method: 'POST' }),
+  reparseAll: () => request('/api/activities/reparse-all', { method: 'POST' }),
   garminDisconnect: () => request('/api/garmin/disconnect', { method: 'DELETE' }),
   garminSessionExport: () => request('/api/garmin/session-export'),
   garminSessionImport: (body) => request('/api/garmin/session-import', { method: 'POST', body }),
@@ -34,6 +37,8 @@ export const api = {
   getActivityFilters: () => request('/api/activities/filters'),
   getActivity: (id) => request(`/api/activities/${id}`),
   deleteActivity: (id) => request(`/api/activities/${id}`, { method: 'DELETE' }),
+  updateSet: (activityId, setId, body) =>
+    request(`/api/activities/${activityId}/sets/${setId}`, { method: 'PATCH', body }),
 
   // Dashboard
   getDashboard: () => request('/api/dashboard'),

@@ -20,10 +20,12 @@ function isRestSet(item) {
   const cat = (exArr[0]?.category || item.category || '').toUpperCase();
   if (cat === 'REST' || cat === 'RECOVERY') return true;
 
-  // Heuristic: null/0 reps and very short duration = Garmin calibration noise at start of set
+  // No exercise type + no reps = sensor noise or unrecognised set.
+  // A set with a valid exercise type (e.g. PULL_UP) is kept even with 0 reps — that is a real
+  // failed attempt and must be counted so the position-based mapper stays aligned with the plan.
+  const rawType = (exArr[0]?.name || item.exerciseName || item.exerciseCategory || '').toUpperCase();
   const reps = item.repetitionCount ?? item.reps ?? null;
-  const dur = item.duration ?? item.movingDuration ?? 0;
-  if ((reps === null || reps === 0) && dur < 3) return true;
+  if ((!rawType || rawType === 'UNKNOWN') && (reps === null || reps === 0)) return true;
 
   return false;
 }
@@ -63,7 +65,115 @@ function formatGarminName(raw) {
     .join(' ');
 }
 
-function extractSetsFromExerciseSets(data, workoutStepMap) {
+function normalizeType(s) {
+  return (s || '').toUpperCase().replace(/[\s\-]+/g, '_');
+}
+
+function meaningfulDesc(desc, baseName) {
+  if (!desc) return false;
+  return normalizeType(desc) !== normalizeType(baseName);
+}
+
+function resolvedName(desc, baseName) {
+  return meaningfulDesc(desc, baseName) ? desc.trim() : formatGarminName(baseName);
+}
+
+// Returns the ordered list of exercise blocks from a Garmin workout plan.
+// Each block: { type, name, sets, supersetId, supersetIterations }
+// supersetId is a shared integer for all exercises in the same multi-exercise RepeatGroupStep
+// (null for single-exercise blocks and flat steps).
+function getPlanBlocks(workoutPlan) {
+  if (!workoutPlan) return [];
+  const blocks = [];
+  let supersetCounter = 0;
+
+  function collect(steps) {
+    for (const step of (steps || [])) {
+      if (step.workoutSteps) {
+        const iters = step.numberOfIterations || 1;
+        const exerciseChildren = step.workoutSteps.filter(s => s.exerciseName || s.displayName);
+        const isSuperset = exerciseChildren.length > 1;
+        const supersetId = isSuperset ? supersetCounter++ : null;
+
+        for (const inner of step.workoutSteps) {
+          const baseName = inner.exerciseName || inner.displayName;
+          if (baseName) {
+            blocks.push({
+              type: normalizeType(baseName),
+              name: resolvedName(inner.description, baseName),
+              sets: iters,
+              supersetId,
+              supersetIterations: isSuperset ? iters : null,
+            });
+          }
+        }
+      } else {
+        const baseName = step.exerciseName || step.displayName;
+        if (baseName) {
+          blocks.push({
+            type: normalizeType(baseName),
+            name: resolvedName(step.description, baseName),
+            sets: step.numberOfIterations || 1,
+            supersetId: null,
+            supersetIterations: null,
+          });
+        }
+      }
+    }
+  }
+
+  for (const seg of (workoutPlan.workoutSegments || [])) collect(seg.workoutSteps);
+  return blocks;
+}
+
+// Builds a stateful position-based exercise name mapper from a Garmin workout plan.
+// Each call to the returned function consumes one set from the matching plan block,
+// advancing to the next block when the set count is exhausted.
+// This lets us correctly assign distinct names to repeated exercises like 3×HSPU groups.
+function buildExerciseNameMapper(workoutPlan) {
+  const blocks = getPlanBlocks(workoutPlan);
+  if (blocks.length === 0) return null;
+
+  // Per-exercise-type queue so different types don't interfere.
+  // For superset blocks (multiple exercises in one RepeatGroupStep), Garmin records them
+  // INTERLEAVED per iteration (R₁ L₁ R₂ L₂ …) rather than sequentially (R₁R₂ L₁L₂).
+  // We expand the queue to match: for each iteration push one slot per superset exercise.
+  const queues = {};
+  const processedSupersets = new Set();
+
+  for (const block of blocks) {
+    if (block.supersetId != null && !processedSupersets.has(block.supersetId)) {
+      const ssBlocks = blocks.filter(b => b.supersetId === block.supersetId);
+      const iters = block.supersetIterations;
+      for (let iter = 0; iter < iters; iter++) {
+        for (const ssBlock of ssBlocks) {
+          if (!queues[ssBlock.type]) queues[ssBlock.type] = [];
+          queues[ssBlock.type].push({ name: ssBlock.name, remaining: 1 });
+        }
+      }
+      processedSupersets.add(block.supersetId);
+    } else if (block.supersetId == null) {
+      if (!queues[block.type]) queues[block.type] = [];
+      queues[block.type].push({ name: block.name, remaining: block.sets });
+    }
+  }
+
+  console.log('[garmin] plan blocks:', blocks.map(b => `${b.type}(${b.name},${b.sets})`).join(' → '));
+
+  return function getNameForSet(garminExerciseName) {
+    const type = normalizeType(garminExerciseName);
+    const queue = queues[type];
+    if (!queue?.length) return null;
+
+    const cur = queue[0];
+    const name = cur.name;
+    cur.remaining--;
+    if (cur.remaining <= 0) queue.shift();
+    return name;
+  };
+}
+
+function extractSetsFromExerciseSets(data, workoutStepMap, exerciseNameMapper) {
   // Garmin exerciseSets endpoint: { activityId, exerciseSets: [ { exercises:[{category,name}], duration, repetitionCount, weight, setType, wktStepIndex }, ... ] }
   const rawSets =
     data?.exerciseSets ||
@@ -78,19 +188,26 @@ function extractSetsFromExerciseSets(data, workoutStepMap) {
   for (const s of rawSets) {
     if (isRestSet(s)) continue;
 
-    // 1. Best source: workout step name from the user's Garmin workout plan
+    const exArr = s.exercises || [];
+    const rawType = exArr[0]?.name || s.exerciseName || s.exerciseCategory || '';
+
     let name = null;
-    if (workoutStepMap && s.wktStepIndex != null) {
+
+    // 1. Position-based workout plan matching (differentiates same-type blocks by description)
+    if (exerciseNameMapper && rawType) {
+      name = exerciseNameMapper(rawType) || null;
+    }
+
+    // 2. wktStepIndex fallback (if workout plan wasn't fetched by name but was via workoutId)
+    if (!name && workoutStepMap && s.wktStepIndex != null) {
       name = workoutStepMap[s.wktStepIndex] || null;
     }
 
-    // 2. Fallback: Garmin auto-detected exercise name from sensor data
+    // 3. Garmin auto-detected exercise name from sensor data
     if (!name) {
-      const exArr = s.exercises || [];
-      const rawName = exArr[0]?.name || exArr[0]?.category || '';
-      name = rawName && rawName.toUpperCase() !== 'UNKNOWN'
-        ? formatGarminName(rawName)
-        : 'Unknown';
+      name = rawType && rawType.toUpperCase() !== 'UNKNOWN'
+        ? formatGarminName(rawType)
+        : (exArr[0]?.category ? formatGarminName(exArr[0].category) : 'Unknown');
     }
 
     // Weight: Garmin stores in kg; 0 means bodyweight
@@ -140,11 +257,13 @@ function extractSetsFromSplits(data) {
 }
 
 function parseActivitySets(detailResponse) {
-  const { splits, workoutStepMap } = detailResponse;
+  const { splits, workoutStepMap, workoutPlan } = detailResponse;
   if (!splits) return [];
 
+  const exerciseNameMapper = buildExerciseNameMapper(workoutPlan);
+
   return (
-    extractSetsFromExerciseSets(splits, workoutStepMap) ||
+    extractSetsFromExerciseSets(splits, workoutStepMap, exerciseNameMapper) ||
     extractSetsFromSplits(splits) ||
     []
   );
@@ -163,4 +282,6 @@ module.exports = {
   parseActivityName,
   parseActivitySets,
   isPartialActivity,
+  buildExerciseNameMapper,
+  getPlanBlocks,
 };

@@ -77,6 +77,9 @@ function ExerciseCard({ exercise, onUpdate }) {
         <div className="flex-1 min-w-0">
           <p className="text-white text-sm font-medium truncate">{exercise.display_name}</p>
           <p className="text-white/30 text-xs mt-0.5">
+            {exercise.planned_sets != null && (
+              <span className="text-indigo-400/60">{exercise.planned_sets} planned · </span>
+            )}
             {exercise.session_count} session{exercise.session_count !== 1 ? 's' : ''}
             {' · '}
             {exercise.total_sets} sets

@@ -58,7 +58,49 @@ router.get('/:id', (req, res) => {
 
   const setsWithValue = sets.map(addDisplayValue);
 
-  res.json({ activity, sets: setsWithValue });
+  // Build plan-structured groups when a matching workout plan is in DB
+  const { getPlanBlocks } = require('../garmin/parser');
+  const { getWorkoutPlanByName } = require('../garmin/client');
+  const plan = getWorkoutPlanByName(activity.name);
+  let planGroups = null;
+
+  if (plan) {
+    const blocks = getPlanBlocks(plan);
+    const getConfig = db.prepare(
+      'SELECT display_name, track_as FROM exercise_configs WHERE garmin_exercise_name = ?'
+    );
+
+    // Group recorded sets by garmin_exercise_name for quick lookup
+    const setsByName = {};
+    for (const s of setsWithValue) {
+      if (!setsByName[s.garmin_exercise_name]) setsByName[s.garmin_exercise_name] = [];
+      setsByName[s.garmin_exercise_name].push(s);
+    }
+
+    // Consume each block's sets sequentially so duplicate exercise names (e.g. two PULL_UP blocks)
+    // each get their own slice of the recorded sets in order
+    const consumed = {};
+    planGroups = blocks.map(block => {
+      const config = getConfig.get(block.name);
+      const allSets = setsByName[block.name] || [];
+      const offset = consumed[block.name] || 0;
+      const blockSets = allSets.slice(offset, offset + block.sets);
+      consumed[block.name] = offset + block.sets;
+
+      return {
+        garmin_exercise_name: block.name,
+        display_name: config?.display_name || block.name,
+        track_as: config?.track_as || 'reps',
+        planned_sets: block.sets,
+        superset_id: block.supersetId,
+        superset_iterations: block.supersetIterations,
+        sets: blockSets,
+        skipped: blockSets.length === 0,
+      };
+    });
+  }
+
+  res.json({ activity, sets: setsWithValue, planGroups });
 });
 
 router.get('/:id/raw', (req, res) => {
@@ -70,6 +112,7 @@ router.get('/:id/raw', (req, res) => {
 // Bulk re-parse all activities from stored raw_json
 router.post('/reparse-all', (req, res) => {
   const { parseActivitySets } = require('../garmin/parser');
+  const { getWorkoutPlanByName } = require('../garmin/client');
   const activities = db.prepare('SELECT id, raw_json FROM activities WHERE raw_json IS NOT NULL').all();
 
   const del = db.prepare('DELETE FROM exercise_sets WHERE activity_id = ?');
@@ -83,6 +126,11 @@ router.post('/reparse-all', (req, res) => {
   for (const act of activities) {
     try {
       const data = JSON.parse(act.raw_json);
+      // Inject DB-backed workout plan if raw_json doesn't have one (or always prefer DB version)
+      const actName = data.activity?.activityName || '';
+      const dbPlan = getWorkoutPlanByName(actName);
+      if (dbPlan) data.workoutPlan = dbPlan;
+
       const sets = parseActivitySets(data);
       db.transaction(() => {
         del.run(act.id);
@@ -103,11 +151,16 @@ router.post('/reparse-all', (req, res) => {
 // Re-parse sets from stored raw_json (useful after fixing the parser without re-fetching)
 router.post('/:id/reparse', (req, res) => {
   const { parseActivitySets } = require('../garmin/parser');
+  const { getWorkoutPlanByName } = require('../garmin/client');
   const row = db.prepare('SELECT id, raw_json FROM activities WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
 
   let data;
   try { data = JSON.parse(row.raw_json); } catch { return res.status(400).json({ error: 'Bad raw_json' }); }
+
+  const actName = data.activity?.activityName || '';
+  const dbPlan = getWorkoutPlanByName(actName);
+  if (dbPlan) data.workoutPlan = dbPlan;
 
   const sets = parseActivitySets(data);
 
@@ -125,6 +178,28 @@ router.post('/:id/reparse', (req, res) => {
   })();
 
   res.json({ ok: true, setsInserted: sets.length, sets });
+});
+
+// Manually edit a single set's reps / duration / weight
+router.patch('/:activityId/sets/:setId', (req, res) => {
+  const set = db.prepare(
+    'SELECT id FROM exercise_sets WHERE id = ? AND activity_id = ?'
+  ).get(req.params.setId, req.params.activityId);
+  if (!set) return res.status(404).json({ error: 'Set not found' });
+
+  const allowed = ['reps', 'duration_seconds', 'weight_kg'];
+  const updates = [];
+  const params = [];
+  for (const field of allowed) {
+    if (req.body[field] !== undefined) {
+      updates.push(`${field} = ?`);
+      params.push(req.body[field]);
+    }
+  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+  db.prepare(`UPDATE exercise_sets SET ${updates.join(', ')} WHERE id = ?`).run(...params, set.id);
+  res.json({ ok: true });
 });
 
 router.delete('/:id', (req, res) => {

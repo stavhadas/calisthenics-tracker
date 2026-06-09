@@ -88,11 +88,49 @@ router.post('/resync', async (req, res) => {
     .finally(() => { syncInProgress = false; });
 });
 
+// Refresh workout plans from Garmin without reimporting activities
+router.post('/refresh-plans', async (req, res) => {
+  const session = garminClient.getSessionStatus();
+  if (!session) return res.status(401).json({ error: 'Not connected to Garmin' });
+  try {
+    const n = await garminClient.fetchAndStoreWorkouts();
+    res.json({ ok: true, updated: n });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Force re-import: deletes existing activities and re-fetches fresh from Garmin
+// Rebuilds workout step maps with latest parsing logic
+router.post('/reimport', async (req, res) => {
+  const session = garminClient.getSessionStatus();
+  if (!session) return res.status(401).json({ error: 'Not connected to Garmin' });
+  if (syncInProgress) return res.status(409).json({ error: 'Sync already in progress' });
+
+  resetLastSynced();
+  syncInProgress = true;
+  lastSyncResult = null;
+  res.status(202).json({ ok: true, message: 'Force reimport started' });
+
+  syncActivities({ force: true })
+    .then((r) => { lastSyncResult = r; })
+    .catch((e) => { lastSyncResult = { error: e.message }; })
+    .finally(() => { syncInProgress = false; });
+});
+
 router.delete('/disconnect', (req, res) => {
   garminClient.markDisconnected();
   syncInProgress = false;
   lastSyncResult = null;
   res.json({ ok: true });
+});
+
+// List all stored workout plans (names + fetch timestamps)
+router.get('/workouts', (req, res) => {
+  const rows = db.prepare(
+    'SELECT workout_id, workout_name, fetched_at FROM garmin_workouts ORDER BY workout_name'
+  ).all();
+  res.json(rows);
 });
 
 // Export raw OAuth tokens so they can be imported on another instance

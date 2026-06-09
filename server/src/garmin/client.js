@@ -152,26 +152,111 @@ async function getStrengthActivities(startDate, endDate) {
 }
 
 function buildWorkoutStepMap(workout) {
-  // Returns { stepIndex: stepName } where stepIndex matches wktStepIndex from exerciseSets
   const map = {};
   const segments = workout?.workoutSegments || [];
 
+  // Flatten steps — handle both flat lists and nested RepeatGroupStep structures
+  const allSteps = [];
+  function collect(steps) {
+    for (const step of (steps || [])) {
+      if (step.workoutSteps) {
+        collect(step.workoutSteps); // RepeatGroupStep container
+      } else {
+        allSteps.push(step);
+      }
+    }
+  }
+  for (const seg of segments) collect(seg.workoutSteps);
+
+  // Count how many distinct step groups share the same exerciseName
+  const nameCount = {};
+  for (const step of allSteps) {
+    const n = step.exerciseName || step.displayName;
+    if (n) nameCount[n] = (nameCount[n] || 0) + 1;
+  }
+
+  // Assign the final name for each step:
+  // - unique exercise type → use Garmin exerciseName (clean, English)
+  // - duplicate exercise type → use the step description to differentiate (user's own label)
+  //   fallback to "ExerciseName N" if no description
+  const nameIdx = {};
   let flatIndex = 0;
-  for (const seg of segments) {
-    for (const step of (seg.workoutSteps || [])) {
-      // exerciseName is the user-defined step name in Garmin workouts
-      const name = step.exerciseName || step.description || step.displayName || null;
-      if (name) {
-        // Store by both 0-based flat index and 1-based stepOrder to cover both conventions
-        map[flatIndex] = name;
+  for (const step of allSteps) {
+    const baseName = step.exerciseName || step.displayName;
+    let name;
+
+    if (!baseName) {
+      // rest/unknown step — skip
+    } else if (nameCount[baseName] > 1) {
+      const desc = step.description?.trim();
+      if (desc) {
+        name = desc;
+      } else {
+        nameIdx[baseName] = (nameIdx[baseName] || 0) + 1;
+        name = `${baseName} ${nameIdx[baseName]}`;
+      }
+    } else {
+      name = baseName;
+    }
+
+    if (name) {
+      map[flatIndex] = name;
+      if (step.stepOrder != null) {
         map[step.stepOrder] = name;
         map[step.stepOrder - 1] = name;
       }
-      flatIndex++;
+    }
+    flatIndex++;
+  }
+
+  console.log('[garmin] workout step map:', JSON.stringify(map));
+  return map;
+}
+
+// In-memory cache: workoutName → plan detail (warmed by fetchAndStoreWorkouts at sync start)
+const _workoutCache = {};
+
+// Fetch every workout in the user's Garmin library and persist to DB.
+// Called once at the start of each sync so plans are available before any activity is parsed.
+async function fetchAndStoreWorkouts() {
+  const client = getClient();
+  const raw = await client.getWorkouts(0, 100);
+  const list = Array.isArray(raw) ? raw : (raw?.workouts || raw?.content || []);
+
+  const upsert = db.prepare(`
+    INSERT INTO garmin_workouts (workout_id, workout_name, plan_json, fetched_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(workout_id) DO UPDATE SET
+      workout_name = excluded.workout_name,
+      plan_json    = excluded.plan_json,
+      fetched_at   = excluded.fetched_at
+  `);
+
+  for (const w of list) {
+    try {
+      const detail = await client.getWorkoutDetail({ workoutId: String(w.workoutId) });
+      upsert.run(String(w.workoutId), w.workoutName, JSON.stringify(detail), new Date().toISOString());
+      _workoutCache[w.workoutName] = detail;
+    } catch (e) {
+      console.log(`[garmin] failed to fetch workout "${w.workoutName}":`, e.message);
     }
   }
 
-  return map;
+  console.log(`[garmin] stored ${list.length} workout plans`);
+  return list.length;
+}
+
+// Read a workout plan by activity name — from memory cache first, then DB.
+function getWorkoutPlanByName(name) {
+  if (!name) return null;
+  if (_workoutCache[name] !== undefined) return _workoutCache[name];
+
+  const row = db.prepare('SELECT plan_json FROM garmin_workouts WHERE workout_name = ?').get(name);
+  if (!row) { _workoutCache[name] = null; return null; }
+
+  const plan = JSON.parse(row.plan_json);
+  _workoutCache[name] = plan;
+  return plan;
 }
 
 async function getActivityDetails(activityId) {
@@ -180,18 +265,33 @@ async function getActivityDetails(activityId) {
 
   const summary = await client.getActivity({ activityId });
 
-  // Fetch workout step names if this activity used a Garmin workout plan
-  let workoutStepMap = null;
-  const workoutId = summary?.workoutId;
+  // Try multiple possible paths where Garmin might embed workoutId in the summary
+  const workoutId =
+    summary?.workoutId ||
+    summary?.metaData?.workoutId ||
+    summary?.summaryDTO?.workoutId ||
+    null;
+
+  let workoutPlan = null;
+
   if (workoutId) {
     try {
-      const workout = await client.getWorkoutDetail({ workoutId: String(workoutId) });
-      workoutStepMap = buildWorkoutStepMap(workout);
-      console.log(`[garmin] workout ${workoutId} step map:`, JSON.stringify(workoutStepMap));
+      workoutPlan = await client.getWorkoutDetail({ workoutId: String(workoutId) });
     } catch (e) {
-      console.log(`[garmin] workout fetch failed for ${workoutId}:`, e.message);
+      console.log(`[garmin] workout fetch via id ${workoutId} failed:`, e.message);
     }
   }
+
+  // Use DB-backed plan (populated by fetchAndStoreWorkouts at sync start)
+  if (!workoutPlan) {
+    workoutPlan = getWorkoutPlanByName(summary?.activityName || '');
+  }
+
+  if (workoutPlan) {
+    console.log(`[garmin] using workout plan for "${summary?.activityName}"`);
+  }
+
+  const workoutStepMap = workoutPlan ? buildWorkoutStepMap(workoutPlan) : null;
 
   // Fetch exercise sets
   let splits = null;
@@ -213,7 +313,7 @@ async function getActivityDetails(activityId) {
     }
   }
 
-  return { summary, splits, workoutStepMap };
+  return { summary, splits, workoutStepMap, workoutPlan };
 }
 
 module.exports = {
@@ -226,4 +326,6 @@ module.exports = {
   getSessionStatus,
   getStrengthActivities,
   getActivityDetails,
+  fetchAndStoreWorkouts,
+  getWorkoutPlanByName,
 };

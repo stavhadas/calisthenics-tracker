@@ -56,9 +56,18 @@ const importActivityTx = db.transaction((garminAct, parsed, sets, isPartial, raw
   return { skipped: false, actId };
 });
 
-async function syncActivities({ since } = {}) {
+async function syncActivities({ since, force = false } = {}) {
   const session = garminClient.getSessionStatus();
   if (!session) throw new Error('Not connected to Garmin');
+
+  // Pre-fetch entire workout library into DB BEFORE processing any activity.
+  // This ensures every workout plan is available for position-based exercise naming.
+  try {
+    const n = await garminClient.fetchAndStoreWorkouts();
+    console.log(`[sync] pre-loaded ${n} workout plans`);
+  } catch (e) {
+    console.warn('[sync] workout pre-fetch failed, using cached plans:', e.message);
+  }
 
   const endDate = new Date();
   const startDate = since instanceof Date ? since : subDays(endDate, 30);
@@ -83,7 +92,11 @@ async function syncActivities({ since } = {}) {
       }
 
       const already = getStmts().checkExists.get(String(act.activityId));
-      if (already) { skipped++; continue; }
+      if (already && !force) { skipped++; continue; }
+      // force mode: delete existing so it gets cleanly reimported with fresh workout step map
+      if (already && force) {
+        db.prepare('DELETE FROM activities WHERE garmin_id = ?').run(String(act.activityId));
+      }
 
       let detailResponse;
       try {
@@ -100,6 +113,7 @@ async function syncActivities({ since } = {}) {
         activity: act,
         splits: detailResponse.splits,
         workoutStepMap: detailResponse.workoutStepMap,
+        workoutPlan: detailResponse.workoutPlan,
       });
 
       const txResult = importActivityTx(act, parsed, sets, partial, rawJson);

@@ -14,6 +14,8 @@ export default function GarminStatus() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [refreshPlansDone, setRefreshPlansDone] = useState(false);
+  const [message, setMessage] = useState('');
 
   const fetchStatus = useCallback(async () => {
     try { setStatus(await api.garminStatus()); } catch {}
@@ -74,10 +76,26 @@ export default function GarminStatus() {
     finally { setLoading(false); }
   };
 
-  const handleResync = async () => {
-    if (!confirm('Re-import all activities from the last 30 days?')) return;
-    setLoading(true); setError('');
-    try { await api.garminResync(); fetchStatus(); }
+  const handleRefreshPlans = async () => {
+    setLoading(true); setError(''); setMessage(''); setRefreshPlansDone(false);
+    try {
+      await api.garminRefreshPlans();
+      const r = await api.reparseAll();
+      setRefreshPlansDone(true);
+      setMessage(`Plans updated · reparsed ${r.activitiesReparsed} activities (${r.totalSets} sets)`);
+      setTimeout(() => { setRefreshPlansDone(false); setMessage(''); }, 5000);
+    }
+    catch (err) { setError(err.message); }
+    finally { setLoading(false); }
+  };
+
+  const handleReparse = async () => {
+    setLoading(true); setError(''); setMessage('');
+    try {
+      const r = await api.reparseAll();
+      setMessage(`Reparsed ${r.activitiesReparsed} activities (${r.totalSets} sets)`);
+      setTimeout(() => setMessage(''), 5000);
+    }
     catch (err) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -195,9 +213,17 @@ export default function GarminStatus() {
               className="text-indigo-400 hover:text-indigo-300 text-xs transition-colors disabled:opacity-50">
               Sync now
             </button>
-            <button onClick={handleResync} disabled={loading}
+            <button onClick={handleRefreshPlans} disabled={loading}
+              className={`text-xs transition-colors disabled:opacity-50 ${
+                refreshPlansDone
+                  ? 'text-emerald-400'
+                  : 'text-white/20 hover:text-white/50'
+              }`}>
+              {refreshPlansDone ? '✓ Plans refreshed' : 'Refresh plans'}
+            </button>
+            <button onClick={handleReparse} disabled={loading}
               className="text-white/20 hover:text-white/50 text-xs transition-colors disabled:opacity-50">
-              Re-sync 30d
+              Reparse
             </button>
           </>
         )}
@@ -239,6 +265,7 @@ export default function GarminStatus() {
         </div>
       )}
 
+      {message && <p className="text-emerald-400/80 text-xs">{message}</p>}
       {error && <p className="text-red-400 text-xs">{error}</p>}
     </div>
   );
